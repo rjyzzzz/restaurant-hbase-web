@@ -79,11 +79,21 @@
     hoverIdx: -1,
     selectedIdx: -1,
 
-    // 缓存命中与屏幕坐标，供 O(N) 快速拾取
+    // 缓存命中与屏幕坐标，供 O(N) 快速拾取与零开销投影
     matchedMask: null, // Uint8Array
     matchedCount: 0,
+    normX: null, // Float64Array (z=0 归一化 X)
+    normY: null, // Float64Array (z=0 归一化 Y)
     screenX: null, // Float32Array
     screenY: null, // Float32Array
+    catBuckets: [],
+    fgStamp: null,
+    bgStamp: null,
+    stampCap: 0,
+    stampId: 0,
+    isInteracting: false,
+    interactTimer: 0,
+    lastTileViewKey: "",
     tileCache: new Map(),
     tilesOfflineWarned: false,
   };
@@ -187,6 +197,9 @@
   }
 
   function cacheDom() {
+    dom.mapStage = $("map-stage");
+    dom.tileCanvas = $("tile-canvas");
+    dom.tileCtx = dom.tileCanvas.getContext("2d");
     dom.canvas = $("map-canvas");
     dom.ctx = dom.canvas.getContext("2d");
     dom.loadingOverlay = $("loading-overlay");
@@ -228,8 +241,21 @@
 
     const n = state.records.length;
     state.matchedMask = new Uint8Array(n);
+    state.normX = new Float64Array(n);
+    state.normY = new Float64Array(n);
     state.screenX = new Float32Array(n);
     state.screenY = new Float32Array(n);
+    state.catBuckets = state.categories.map(() => []);
+
+    for (let i = 0; i < n; i++) {
+      const r = state.records[i];
+      state.normX[i] = (r[7] + 180) / 360;
+      const clamped = Math.max(-85.0511, Math.min(85.0511, r[8]));
+      const s = Math.sin((clamped * Math.PI) / 180);
+      state.normY[i] = 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+    }
+
+    updateBasemapClasses();
 
     state.catColors = state.categories.map(
       (c, i) => CATEGORY_COLORS[c] || FALLBACK_PALETTE[i % FALLBACK_PALETTE.length]
@@ -594,6 +620,7 @@
     entry.img.referrerPolicy = "no-referrer";
     entry.img.onload = () => {
       entry.status = "ok";
+      state.lastTileViewKey = "";
       requestDraw();
     };
     entry.img.onerror = () => {
@@ -601,7 +628,7 @@
     };
     entry.img.src = url;
 
-    if (state.tileCache.size > 450) {
+    if (state.tileCache.size > 600) {
       const firstKey = state.tileCache.keys().next().value;
       state.tileCache.delete(firstKey);
     }
@@ -609,11 +636,102 @@
     return entry;
   }
 
+  function updateBasemapClasses() {
+    if (!dom.mapStage || !dom.tileCanvas) return;
+    const isLight = state.basemap === "amap_light" || state.basemap === "osm";
+    dom.mapStage.classList.toggle("basemap-light", isLight);
+    dom.tileCanvas.classList.toggle("dark-filter", state.basemap === "amap_dark");
+    state.lastTileViewKey = "";
+  }
+
+  function ensureStampBuffers(gridLen) {
+    if (state.stampCap < gridLen) {
+      state.fgStamp = new Uint32Array(gridLen);
+      state.bgStamp = new Uint32Array(gridLen);
+      state.stampCap = gridLen;
+      state.stampId = 0;
+    }
+    state.stampId++;
+    if (state.stampId >= 0xfffffffe) {
+      state.fgStamp.fill(0);
+      state.bgStamp.fill(0);
+      state.stampId = 1;
+    }
+    return state.stampId;
+  }
+
+  function markInteracting(autoEndMs = 0) {
+    state.isInteracting = true;
+    if (state.interactTimer) {
+      clearTimeout(state.interactTimer);
+      state.interactTimer = 0;
+    }
+    if (autoEndMs > 0) {
+      state.interactTimer = setTimeout(() => {
+        state.isInteracting = false;
+        state.interactTimer = 0;
+        requestDraw();
+      }, autoEndMs);
+    }
+  }
+
   let drawQueued = false;
   function requestDraw() {
     if (drawQueued) return;
     drawQueued = true;
     requestAnimationFrame(drawFrame);
+  }
+
+  function drawTilesLayer(w, h, dpr, z) {
+    const tCanvas = dom.tileCanvas;
+    const tCtx = dom.tileCtx;
+    const targetW = Math.round(w * dpr);
+    const targetH = Math.round(h * dpr);
+    if (tCanvas.width !== targetW || tCanvas.height !== targetH) {
+      tCanvas.width = targetW;
+      tCanvas.height = targetH;
+      state.lastTileViewKey = "";
+    }
+
+    const tileKey = `${state.basemap}:${w}:${h}:${dpr}:${state.view.lng.toFixed(5)}:${state.view.lat.toFixed(5)}:${z.toFixed(3)}`;
+    if (state.lastTileViewKey === tileKey) return;
+    state.lastTileViewKey = tileKey;
+
+    tCtx.save();
+    tCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    tCtx.clearRect(0, 0, w, h);
+
+    if (state.basemap !== "offline") {
+      const tz = Math.max(4, Math.min(18, Math.round(z)));
+      const tileScale = Math.pow(2, z - tz);
+      const tilePx = 256 * tileScale;
+      const cTx = lngToWorldX(state.view.lng, tz);
+      const cTy = latToWorldY(state.view.lat, tz);
+
+      const minX = Math.floor((cTx - w / 2 / tileScale) / 256);
+      const maxX = Math.floor((cTx + w / 2 / tileScale) / 256);
+      const minY = Math.floor((cTy - h / 2 / tileScale) / 256);
+      const maxY = Math.floor((cTy + h / 2 / tileScale) / 256);
+      const maxTile = (1 << tz) - 1;
+
+      for (let tx = minX; tx <= maxX; tx++) {
+        if (tx < 0 || tx > maxTile) continue;
+        for (let ty = minY; ty <= maxY; ty++) {
+          if (ty < 0 || ty > maxTile) continue;
+          const entry = getTile(state.basemap, tz, tx, ty);
+          if (entry && entry.status === "ok") {
+            const dx = w / 2 + (tx * 256 - cTx) * tileScale;
+            const dy = h / 2 + (ty * 256 - cTy) * tileScale;
+            tCtx.drawImage(entry.img, dx, dy, tilePx + 0.5, tilePx + 0.5);
+          }
+        }
+      }
+    }
+
+    const cWx = lngToWorldX(state.view.lng, z);
+    const cWy = latToWorldY(state.view.lat, z);
+    drawGraticule(tCtx, w, h, z, cWx, cWy);
+    tCtx.restore();
   }
 
   function drawFrame(now) {
@@ -633,114 +751,100 @@
 
     const canvas = dom.canvas;
     const ctx = dom.ctx;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
     if (w === 0 || h === 0) return;
 
-    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
+    const targetW = Math.round(w * dpr);
+    const targetH = Math.round(h * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
     }
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // 1. 背景底色
-    ctx.fillStyle = state.basemap === "amap_light" || state.basemap === "osm" ? "#e5e7eb" : "#070d19";
-    ctx.fillRect(0, 0, w, h);
 
     const z = state.view.zoom;
+    drawTilesLayer(w, h, dpr, z);
+
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const worldScale = 256 * Math.pow(2, z);
     const cWx = lngToWorldX(state.view.lng, z);
     const cWy = latToWorldY(state.view.lat, z);
+    const halfW = w * 0.5;
+    const halfH = h * 0.5;
+    const offX = halfW - cWx;
+    const offY = halfH - cWy;
 
-    // 2. 在线瓦片（支持暗夜滤镜；离线或加载失败自动无声跳过）
-    if (state.basemap !== "offline") {
-      const tz = Math.max(4, Math.min(18, Math.round(z)));
-      const tileScale = Math.pow(2, z - tz);
-      const tilePx = 256 * tileScale;
-      const cTx = lngToWorldX(state.view.lng, tz);
-      const cTy = latToWorldY(state.view.lat, tz);
-
-      const minX = Math.floor((cTx - w / 2 / tileScale) / 256);
-      const maxX = Math.floor((cTx + w / 2 / tileScale) / 256);
-      const minY = Math.floor((cTy - h / 2 / tileScale) / 256);
-      const maxY = Math.floor((cTy + h / 2 / tileScale) / 256);
-      const maxTile = (1 << tz) - 1;
-
-      ctx.save();
-      if (state.basemap === "amap_dark") {
-        ctx.filter = "invert(92%) hue-rotate(180deg) brightness(82%) contrast(108%) saturate(55%)";
-        ctx.globalAlpha = 0.78;
-      } else {
-        ctx.globalAlpha = 0.88;
-      }
-
-      for (let tx = minX; tx <= maxX; tx++) {
-        if (tx < 0 || tx > maxTile) continue;
-        for (let ty = minY; ty <= maxY; ty++) {
-          if (ty < 0 || ty > maxTile) continue;
-          const entry = getTile(state.basemap, tz, tx, ty);
-          if (entry && entry.status === "ok") {
-            const dx = w / 2 + (tx * 256 - cTx) * tileScale;
-            const dy = h / 2 + (ty * 256 - cTy) * tileScale;
-            ctx.drawImage(entry.img, dx, dy, tilePx + 0.5, tilePx + 0.5);
-          }
-        }
-      }
-      ctx.restore();
-    }
-
-    // 3. 轻量经纬网（离线底图极佳，在线时极淡辅助）
-    drawGraticule(ctx, w, h, z, cWx, cWy);
-
-    // 4. 78,018 个餐饮点位绘制
+    // 4. 78,018 个餐饮点位绘制（预计算墨卡托 + 屏幕像素格网去重）
     const n = state.records.length;
     const mask = state.matchedMask;
+    const normX = state.normX;
+    const normY = state.normY;
     const sxArr = state.screenX;
     const syArr = state.screenY;
     const zoomBoost = Math.max(0.7, Math.min(1.8, (z - 9.5) * 0.22 + 0.85));
     const hiR = state.pointRadius * zoomBoost;
     const bgR = Math.max(1.0, 1.3 * zoomBoost);
     const hasFilter = state.matchedCount < n;
+    const fastMode = state.isInteracting || state.animTarget !== null;
 
-    // 4a. 未命中背景点（高亮模式下压暗保留上海城市轮廓）
-    if (state.displayMode === "highlight" && hasFilter) {
+    // 屏幕格网分辨率：背景恒用 2px 格网；前景在点多或缩小/交互时启用去重
+    const bgBin = 2;
+    const bgGridW = Math.ceil(w / bgBin) + 1;
+    const bgGridH = Math.ceil(h / bgBin) + 1;
+    const fgBin = (state.matchedCount > 3000 || z < 11.2 || fastMode) ? (fastMode && state.matchedCount > 5000 ? 2 : 1) : 0;
+    const fgGridW = fgBin > 0 ? Math.ceil(w / fgBin) + 1 : 1;
+    const fgGridH = fgBin > 0 ? Math.ceil(h / fgBin) + 1 : 1;
+    const stampId = ensureStampBuffers(Math.max(bgGridW * bgGridH, fgGridW * fgGridH));
+    const bgStamp = state.bgStamp;
+    const fgStamp = state.fgStamp;
+
+    const buckets = state.catBuckets;
+    for (let c = 0; c < buckets.length; c++) {
+      buckets[c].length = 0;
+    }
+
+    const drawBg = state.displayMode === "highlight" && hasFilter;
+    if (drawBg) {
       ctx.fillStyle = state.basemap === "amap_light" || state.basemap === "osm"
         ? "rgba(100, 116, 139, 0.14)"
-        : "rgba(148, 163, 184, 0.11)";
+        : "rgba(148, 163, 184, 0.13)";
       ctx.beginPath();
-      for (let i = 0; i < n; i++) {
-        const r = state.records[i];
-        const sx = w / 2 + (lngToWorldX(r[7], z) - cWx);
-        const sy = h / 2 + (latToWorldY(r[8], z) - cWy);
-        sxArr[i] = sx;
-        syArr[i] = sy;
-        if (mask[i] === 1) continue;
-        if (sx < -4 || sx > w + 4 || sy < -4 || sy > h + 4) continue;
-        ctx.rect(sx - bgR * 0.5, sy - bgR * 0.5, bgR, bgR);
+    }
+
+    const rec = state.records;
+    const bgHalf = bgR * 0.5;
+    for (let i = 0; i < n; i++) {
+      const sx = normX[i] * worldScale + offX;
+      const sy = normY[i] * worldScale + offY;
+      sxArr[i] = sx;
+      syArr[i] = sy;
+
+      if (sx < -8 || sx > w + 8 || sy < -8 || sy > h + 8) continue;
+
+      if (mask[i] === 1) {
+        if (fgBin > 0 && sx >= 0 && sx < w && sy >= 0 && sy < h) {
+          const cell = ((sy / fgBin) | 0) * fgGridW + ((sx / fgBin) | 0);
+          if (fgStamp[cell] === stampId) continue;
+          fgStamp[cell] = stampId;
+        }
+        buckets[rec[i][2]].push(sx, sy);
+      } else if (drawBg && sx >= 0 && sx < w && sy >= 0 && sy < h) {
+        const cell = ((sy / bgBin) | 0) * bgGridW + ((sx / bgBin) | 0);
+        if (bgStamp[cell] === stampId) continue;
+        bgStamp[cell] = stampId;
+        ctx.rect(sx - bgHalf, sy - bgHalf, bgR, bgR);
       }
+    }
+    if (drawBg) {
       ctx.fill();
     }
 
-    // 4b. 命中点按品类分批着色（28 次 fill 即可画完数万点，性能极高）
-    const buckets = Array.from({ length: state.categories.length }, () => []);
-    for (let i = 0; i < n; i++) {
-      const r = state.records[i];
-      let sx = sxArr[i];
-      let sy = syArr[i];
-      if (state.displayMode === "only" || !hasFilter) {
-        sx = w / 2 + (lngToWorldX(r[7], z) - cWx);
-        sy = h / 2 + (latToWorldY(r[8], z) - cWy);
-        sxArr[i] = sx;
-        syArr[i] = sy;
-      }
-      if (mask[i] !== 1) continue;
-      if (sx < -8 || sx > w + 8 || sy < -8 || sy > h + 8) continue;
-      buckets[r[2]].push(sx, sy);
-    }
-
-    const useGlow = hasFilter && state.matchedCount <= 6000;
+    const useGlow = !fastMode && hasFilter && state.matchedCount <= 6000;
+    const useRect = fastMode || (hiR <= 2.2 && !hasFilter);
     for (let c = 0; c < buckets.length; c++) {
       const pts = buckets[c];
       if (pts.length === 0) continue;
@@ -759,11 +863,13 @@
       }
 
       ctx.fillStyle = color;
-      ctx.globalAlpha = hasFilter ? 0.92 : 0.72;
+      ctx.globalAlpha = hasFilter ? 0.92 : 0.76;
       ctx.beginPath();
-      if (hiR <= 2.2 && !hasFilter) {
+      if (useRect) {
+        const size = hiR * 1.45;
+        const half = size * 0.5;
         for (let k = 0; k < pts.length; k += 2) {
-          ctx.rect(pts[k] - hiR * 0.5, pts[k + 1] - hiR * 0.5, hiR, hiR);
+          ctx.rect(pts[k] - half, pts[k + 1] - half, size, size);
         }
       } else {
         for (let k = 0; k < pts.length; k += 2) {
@@ -1039,6 +1145,7 @@
 
     dom.basemapSelect.addEventListener("change", () => {
       state.basemap = dom.basemapSelect.value;
+      updateBasemapClasses();
       requestDraw();
     });
 
@@ -1160,6 +1267,7 @@
       state.dragging = true;
       state.dragMoved = false;
       state.lastMouse = { x: e.clientX, y: e.clientY };
+      markInteracting(0);
     });
 
     window.addEventListener("mousemove", (e) => {
@@ -1207,6 +1315,7 @@
     window.addEventListener("mouseup", (e) => {
       if (!state.dragging) return;
       state.dragging = false;
+      state.isInteracting = false;
       if (!state.dragMoved) {
         const rect = dom.canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
@@ -1216,11 +1325,13 @@
           if (hit >= 0) selectRecord(hit);
         }
       }
+      requestDraw();
     });
 
     dom.canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       state.animTarget = null;
+      markInteracting(120);
       const rect = dom.canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -1249,6 +1360,7 @@
 
     dom.canvas.addEventListener("touchstart", (e) => {
       state.animTarget = null;
+      markInteracting(0);
       if (e.touches.length === 1) {
         const t = e.touches[0];
         touchState.mode = "pan";
@@ -1320,6 +1432,8 @@
       if (e.touches.length === 0) {
         touchState.mode = "none";
         touchState.pinchDist = 0;
+        state.isInteracting = false;
+        requestDraw();
       }
     });
   }
