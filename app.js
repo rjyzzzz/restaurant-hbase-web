@@ -38,6 +38,19 @@
     "#fb7185", "#2dd4bf", "#f97316", "#84cc16", "#60a5fa",
   ];
 
+  // 原始数据集保留截断/错别字原值，搜索时补充常见全称别名
+  const CATEGORY_SEARCH_ALIASES = {
+    "啡厅": "咖啡 咖啡厅",
+    "常菜": "家常菜",
+    "助餐": "自助餐",
+    "亚菜": "东南亚菜",
+    "湾菜": "台湾菜",
+    "疆菜": "新疆菜",
+    "本菜": "本帮菜",
+    "北菜": "东北菜",
+    "午茶": "下午茶",
+  };
+
   // 默认上海中心视野
   const DEFAULT_VIEW = { lng: 121.4737, lat: 31.2104, zoom: 10.6 };
 
@@ -78,6 +91,7 @@
     lastMouse: { x: 0, y: 0 },
     hoverIdx: -1,
     selectedIdx: -1,
+    isStaticHost: false,
 
     // 缓存命中与屏幕坐标，供 O(N) 快速拾取与零开销投影
     matchedMask: null, // Uint8Array
@@ -202,15 +216,27 @@
       if (!dataResp.ok) {
         throw new Error(`HTTP ${dataResp.status}`);
       }
-      const statusResp = await fetch("/api/status").catch(() => null);
+      const isLocalHost =
+        window.location.hostname === "127.0.0.1" ||
+        window.location.hostname === "localhost";
+      const statusResp = isLocalHost
+        ? await fetch("/api/status").catch(() => null)
+        : null;
       const payload = await dataResp.json();
       loadPayload(payload);
 
       if (statusResp && statusResp.ok) {
+        state.isStaticHost = false;
         const st = await statusResp.json();
         updateHBaseStatus(st);
       } else {
+        state.isStaticHost = true;
         dom.hbaseStatus.textContent = `静态托管快照 · ${state.records.length.toLocaleString()} 条`;
+        const liveBtn = $("btn-live-get");
+        if (liveBtn) {
+          liveBtn.textContent = "仅支持快照";
+          liveBtn.title = "当前为静态网站托管模式（GitHub Pages），仅在本地运行 server.py + HBase 时支持实时 Get";
+        }
       }
     } catch (err) {
       dom.loadingOverlay.innerHTML = `<div style="color:#fda4af">加载失败：${err.message}</div>`;
@@ -219,15 +245,15 @@
 
     dom.loadingOverlay.style.display = "none";
     resizeCanvas();
-    applyFilters(false);
+    applyFilters("none");
     // 默认选中一个典型点位（优先找宝山海鲜或有价格记录）方便右侧直接展示
     const demoIdx = state.records.findIndex(
       (r) => state.districts[r[1]] === "宝山区" && state.categories[r[2]] === "海鲜" && r[3] > 0
     );
     if (demoIdx >= 0) {
-      selectRecord(demoIdx);
+      selectRecord(demoIdx, false);
     } else if (state.records.length > 0) {
-      selectRecord(0);
+      selectRecord(0, false);
     }
     requestDraw();
   }
@@ -359,7 +385,7 @@
         toggleSetItem(state.selectedDistricts, idx);
         clearPresetActive();
         syncChipSelections();
-        applyFilters(state.autoFit);
+        applyFilters(state.autoFit ? "auto" : "none");
       });
       dom.districtList.appendChild(btn);
     });
@@ -377,7 +403,7 @@
         toggleSetItem(state.selectedPriceLevels, idx);
         clearPresetActive();
         syncChipSelections();
-        applyFilters(false);
+        applyFilters("none");
       });
       dom.priceLevelList.appendChild(btn);
     });
@@ -387,7 +413,8 @@
     const q = dom.catSearch.value.trim();
     dom.categoryList.innerHTML = "";
     state.categories.forEach((c, idx) => {
-      if (q && !c.includes(q)) return;
+      const alias = CATEGORY_SEARCH_ALIASES[c] || "";
+      if (q && !c.includes(q) && !alias.includes(q)) return;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "chip" + (state.selectedCategories.has(idx) ? " selected" : "");
@@ -398,7 +425,7 @@
         toggleSetItem(state.selectedCategories, idx);
         clearPresetActive();
         syncChipSelections();
-        applyFilters(state.autoFit);
+        applyFilters(state.autoFit ? "auto" : "none");
       });
       dom.categoryList.appendChild(btn);
     });
@@ -421,7 +448,7 @@
         }
         clearPresetActive();
         syncChipSelections();
-        applyFilters(false);
+        applyFilters("none");
       });
       dom.legendItems.appendChild(item);
     }
@@ -450,7 +477,7 @@
   }
 
   // ==================== 核心过滤与实时统计 ====================
-  function applyFilters(shouldAutoFit) {
+  function applyFilters(fitMode = "none") {
     const useDist = state.selectedDistricts.size > 0;
     const useCat = state.selectedCategories.size > 0;
     const usePL = state.selectedPriceLevels.size > 0;
@@ -473,6 +500,8 @@
 
     let minLng = 999, maxLng = -999, minLat = 999, maxLat = -999;
     let shBoxMatched = 0;
+    let bestMatchedIdx = -1;
+    let bestScore = -1;
 
     for (let i = 0; i < n; i++) {
       const r = state.records[i];
@@ -489,6 +518,12 @@
       plBins[r[5]]++;
       catHit[r[2]]++;
       distHit[r[1]]++;
+
+      const score = (r[3] > 0 ? 1000000 : 0) + r[4];
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatchedIdx = i;
+      }
 
       if (r[6] === 1 && r[3] > 0) {
         usablePrices.push(r[3]);
@@ -508,7 +543,20 @@
     state.matchedCount = count;
     updateHudAndStats(count, plBins, catHit, distHit, usablePrices, usableSum, usableMax);
 
-    if (shouldAutoFit && shBoxMatched > 0 && (useDist || useCat || usePL || minP !== null || maxP !== null)) {
+    // 若原选中点已被当前筛选排除，则同步切换详情面板并收起旧浮条
+    if (state.selectedIdx < 0 || mask[state.selectedIdx] !== 1) {
+      const banner = $("mobile-pick-banner");
+      if (banner) banner.hidden = true;
+      if (bestMatchedIdx >= 0) {
+        selectRecord(bestMatchedIdx, false);
+      } else {
+        state.selectedIdx = -1;
+        $("inspector-empty").hidden = false;
+        $("inspector-body").hidden = true;
+      }
+    }
+
+    if (shBoxMatched > 0 && (fitMode === "force" || (fitMode === "auto" && count < n))) {
       fitBounds(minLng, minLat, maxLng, maxLat);
     }
 
@@ -521,10 +569,10 @@
     dom.hudMatched.textContent = count.toLocaleString();
     dom.hudRatio.textContent = `/ ${total.toLocaleString()} 条 (${pct}%)`;
 
-    const dDesc = state.selectedDistricts.size === 0
+    const dDesc = state.selectedDistricts.size === 0 || state.selectedDistricts.size === state.districts.length
       ? "全部行政区"
       : [...state.selectedDistricts].map((i) => state.districts[i]).join("、");
-    const cDesc = state.selectedCategories.size === 0
+    const cDesc = state.selectedCategories.size === 0 || state.selectedCategories.size === state.categories.length
       ? "全部菜系"
       : [...state.selectedCategories].map((i) => state.categories[i]).join("、");
     dom.hudFilterDesc.textContent = `${dDesc} · ${cDesc}`;
@@ -616,8 +664,8 @@
     const padLat = Math.max(0.02, (maxLat - minLat) * 0.22);
     const [cLng, cLat] = toMapCoord((minLng + maxLng) / 2, (minLat + maxLat) / 2);
 
-    let bestZ = 12.5;
-    for (let z = 14; z >= 9; z -= 0.25) {
+    let bestZ = 7.5;
+    for (let z = 14; z >= 7.5; z -= 0.25) {
       const dx = lngToWorldX(maxLng + padLng, z) - lngToWorldX(minLng - padLng, z);
       const dy = latToWorldY(minLat - padLat, z) - latToWorldY(maxLat + padLat, z);
       if (dx <= w * 0.85 && dy <= h * 0.85) {
@@ -625,7 +673,7 @@
         break;
       }
     }
-    flyTo(cLng, cLat, Math.max(9.5, Math.min(13.8, bestZ)));
+    flyTo(cLng, cLat, Math.max(7.5, Math.min(13.8, bestZ)));
   }
 
   function flyTo(lng, lat, zoom) {
@@ -1112,7 +1160,7 @@
     return bestIdx;
   }
 
-  function selectRecord(idx) {
+  function selectRecord(idx, showMobileBanner = true) {
     state.selectedIdx = idx;
     const r = state.records[idx];
     if (!r) return;
@@ -1180,7 +1228,7 @@
 
     const banner = $("mobile-pick-banner");
     const mpbInfo = $("mpb-info");
-    if (banner && mpbInfo) {
+    if (banner && mpbInfo && showMobileBanner) {
       const priceText = avgPrice > 0 ? `${avgPrice}元` : "价未知";
       mpbInfo.textContent = `${dName} · ${cName} · ${priceText} (${rk})`;
       banner.hidden = false;
@@ -1229,7 +1277,7 @@
     });
 
     $("btn-fit-match").addEventListener("click", () => {
-      applyFilters(true);
+      applyFilters("force");
     });
 
     $("btn-zoom-in").addEventListener("click", () => {
@@ -1257,28 +1305,28 @@
     });
 
     $("btn-dist-all").addEventListener("click", () => {
-      state.selectedDistricts.clear();
+      state.selectedDistricts = new Set(state.districts.map((_, i) => i));
       clearPresetActive();
       syncChipSelections();
-      applyFilters(false);
+      applyFilters("none");
     });
     $("btn-dist-clear").addEventListener("click", () => {
       state.selectedDistricts.clear();
       clearPresetActive();
       syncChipSelections();
-      applyFilters(false);
+      applyFilters("none");
     });
     $("btn-cat-all").addEventListener("click", () => {
-      state.selectedCategories.clear();
+      state.selectedCategories = new Set(state.categories.map((_, i) => i));
       clearPresetActive();
       syncChipSelections();
-      applyFilters(false);
+      applyFilters("none");
     });
     $("btn-cat-clear").addEventListener("click", () => {
       state.selectedCategories.clear();
       clearPresetActive();
       syncChipSelections();
-      applyFilters(false);
+      applyFilters("none");
     });
 
     dom.catSearch.addEventListener("input", renderCategoryChips);
@@ -1292,7 +1340,7 @@
       state.minReviews = minR === "" ? null : Number(minR);
       state.usableOnly = dom.chkUsableOnly.checked;
       clearPresetActive();
-      applyFilters(false);
+      applyFilters("none");
     };
     dom.inpMinPrice.addEventListener("input", onNumericChange);
     dom.inpMaxPrice.addEventListener("input", onNumericChange);
@@ -1318,6 +1366,10 @@
       const rk = state.records[state.selectedIdx][0];
       const box = $("live-hbase-box");
       box.hidden = false;
+      if (state.isStaticHost) {
+        box.textContent = "[静态托管模式] 当前访问的是 GitHub Pages 静态快照，无在线 HBase 后端服务。\n上方已完整展示该条记录从 HBase 导出的 RowKey 分段与 11 个 Cell 结构；在本地启动 server.py + HBase 后即可实时 Get。";
+        return;
+      }
       box.textContent = `正在向本地 HBase 查询 RowKey=${rk} ...`;
       try {
         const resp = await fetch(`/api/hbase/live-row?rowkey=${encodeURIComponent(rk)}`);
@@ -1579,8 +1631,8 @@
     }
 
     syncChipSelections();
-    applyFilters(name !== "all");
-    if (name === "all") {
+    applyFilters(name !== "all" && state.autoFit ? "auto" : "none");
+    if (name === "all" && state.autoFit) {
       flyTo(DEFAULT_VIEW.lng, DEFAULT_VIEW.lat, DEFAULT_VIEW.zoom);
     }
   }
