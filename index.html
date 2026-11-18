@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>上海市餐饮空间分布与 HBase 存储可视化</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -153,6 +153,12 @@
         <!-- 悬停提示 -->
         <div class="tooltip" id="map-tooltip" hidden></div>
 
+        <!-- 手机端点击点位浮条 -->
+        <div class="mobile-pick-banner" id="mobile-pick-banner" hidden>
+          <div class="mpb-info" id="mpb-info"></div>
+          <button class="btn-xs" id="btn-mpb-detail">看 Cell 拆解</button>
+        </div>
+
         <!-- 加载遮罩 -->
         <div class="loading-overlay" id="loading-overlay">
           <div class="spinner"></div>
@@ -229,6 +235,13 @@
         </section>
       </aside>
     </main>
+
+    <!-- 手机端底部切换栏 -->
+    <nav class="mobile-tabs" id="mobile-tabs">
+      <button class="mobile-tab-btn active" data-tab="map">🗺️ 地图</button>
+      <button class="mobile-tab-btn" data-tab="filter">🎛️ 筛选</button>
+      <button class="mobile-tab-btn" data-tab="stats">📊 画像与 Cell</button>
+    </nav>
   </div>
 
   <script src="app.js"></script>

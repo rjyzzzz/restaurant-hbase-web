@@ -127,10 +127,26 @@
     return lng >= 120.8 && lng <= 122.2 && lat >= 30.6 && lat <= 31.9;
   }
 
+  function setMobileTab(tab) {
+    document.body.dataset.mobileTab = tab;
+    document.querySelectorAll(".mobile-tab-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === tab);
+    });
+    if (tab === "map") {
+      requestDraw();
+    }
+  }
+
   // ==================== 初始化 ====================
   async function init() {
+    document.body.dataset.mobileTab = "map";
     cacheDom();
     bindEvents();
+
+    if (window.innerWidth <= 900) {
+      dom.legendItems.style.display = "none";
+      $("btn-legend-toggle").textContent = "展开";
+    }
 
     try {
       let dataResp = await fetch("data/restaurants_compact.json").catch(() => null);
@@ -520,8 +536,8 @@
 
   // ==================== 相机控制与平滑飞行 ====================
   function fitBounds(minLng, minLat, maxLng, maxLat) {
-    const w = dom.canvas.clientWidth || 800;
-    const h = dom.canvas.clientHeight || 600;
+    const w = dom.canvas.clientWidth || window.innerWidth || 800;
+    const h = dom.canvas.clientHeight || Math.round((window.innerHeight || 600) * 0.72);
     const padLng = Math.max(0.02, (maxLng - minLng) * 0.22);
     const padLat = Math.max(0.02, (maxLat - minLat) * 0.22);
     const cLng = (minLng + maxLng) / 2;
@@ -878,12 +894,12 @@
   }
 
   // ==================== 拾取与 HBase 存储检视 ====================
-  function pickPointAt(mx, my) {
+  function pickPointAt(mx, my, extraTol = 0) {
     const n = state.records.length;
     const sxArr = state.screenX;
     const syArr = state.screenY;
     const mask = state.matchedMask;
-    const tol = Math.max(7, state.pointRadius + 4);
+    const tol = Math.max(7, state.pointRadius + 4) + extraTol;
     const tol2 = tol * tol;
 
     let bestIdx = -1;
@@ -982,12 +998,34 @@
       </tr>
     `).join("");
 
+    const banner = $("mobile-pick-banner");
+    const mpbInfo = $("mpb-info");
+    if (banner && mpbInfo) {
+      const priceText = avgPrice > 0 ? `${avgPrice}元` : "价未知";
+      mpbInfo.textContent = `${dName} · ${cName} · ${priceText} (${rk})`;
+      banner.hidden = false;
+    }
+
     requestDraw();
   }
 
   // ==================== 交互与事件绑定 ====================
   function bindEvents() {
     window.addEventListener("resize", resizeCanvas);
+
+    const mobileTabs = $("mobile-tabs");
+    if (mobileTabs) {
+      mobileTabs.addEventListener("click", (e) => {
+        const btn = e.target.closest(".mobile-tab-btn");
+        if (!btn) return;
+        setMobileTab(btn.dataset.tab);
+      });
+    }
+
+    const mpbDetail = $("btn-mpb-detail");
+    if (mpbDetail) {
+      mpbDetail.addEventListener("click", () => setMobileTab("stats"));
+    }
 
     // 预设场景按钮
     $("presets").addEventListener("click", (e) => {
@@ -996,6 +1034,7 @@
       applyPreset(btn.dataset.preset);
       document.querySelectorAll(".preset-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
+      if (window.innerWidth <= 900) setMobileTab("map");
     });
 
     dom.basemapSelect.addEventListener("change", () => {
@@ -1204,6 +1243,85 @@
       state.view.zoom = newZ;
       requestDraw();
     }, { passive: false });
+
+    // 手机端单指拖拽 / 点选 + 双指捏合缩放
+    const touchState = { mode: "none", x: 0, y: 0, moved: false, pinchDist: 0 };
+
+    dom.canvas.addEventListener("touchstart", (e) => {
+      state.animTarget = null;
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        touchState.mode = "pan";
+        touchState.x = t.clientX;
+        touchState.y = t.clientY;
+        touchState.moved = false;
+      } else if (e.touches.length === 2) {
+        touchState.mode = "pinch";
+        const t0 = e.touches[0], t1 = e.touches[1];
+        touchState.pinchDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+        touchState.x = (t0.clientX + t1.clientX) / 2;
+        touchState.y = (t0.clientY + t1.clientY) / 2;
+        touchState.moved = true;
+      }
+    }, { passive: true });
+
+    dom.canvas.addEventListener("touchmove", (e) => {
+      e.preventDefault();
+      const rect = dom.canvas.getBoundingClientRect();
+      if (touchState.mode === "pan" && e.touches.length === 1) {
+        const t = e.touches[0];
+        const dx = t.clientX - touchState.x;
+        const dy = t.clientY - touchState.y;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) touchState.moved = true;
+        touchState.x = t.clientX;
+        touchState.y = t.clientY;
+
+        const z = state.view.zoom;
+        state.view.lng = worldXToLng(lngToWorldX(state.view.lng, z) - dx, z);
+        state.view.lat = worldYToLat(latToWorldY(state.view.lat, z) - dy, z);
+        requestDraw();
+      } else if (e.touches.length === 2) {
+        const t0 = e.touches[0], t1 = e.touches[1];
+        const newDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+        const midX = (t0.clientX + t1.clientX) / 2 - rect.left;
+        const midY = (t0.clientY + t1.clientY) / 2 - rect.top;
+        if (touchState.pinchDist > 0 && newDist > 0) {
+          const oldZ = state.view.zoom;
+          const dz = Math.log2(newDist / touchState.pinchDist);
+          const newZ = Math.max(4, Math.min(17, oldZ + dz));
+          const targetWx = lngToWorldX(state.view.lng, oldZ) + (midX - rect.width / 2);
+          const targetWy = latToWorldY(state.view.lat, oldZ) + (midY - rect.height / 2);
+          const anchorLng = worldXToLng(targetWx, oldZ);
+          const anchorLat = worldYToLat(targetWy, oldZ);
+          state.view.lng = worldXToLng(lngToWorldX(anchorLng, newZ) - (midX - rect.width / 2), newZ);
+          state.view.lat = worldYToLat(latToWorldY(anchorLat, newZ) - (midY - rect.height / 2), newZ);
+          state.view.zoom = newZ;
+          requestDraw();
+        }
+        touchState.pinchDist = newDist;
+        touchState.mode = "pinch";
+      }
+    }, { passive: false });
+
+    dom.canvas.addEventListener("touchend", (e) => {
+      if (touchState.mode === "pan" && !touchState.moved && e.changedTouches.length === 1) {
+        const t = e.changedTouches[0];
+        const rect = dom.canvas.getBoundingClientRect();
+        const mx = t.clientX - rect.left;
+        const my = t.clientY - rect.top;
+        const hit = pickPointAt(mx, my, 8);
+        if (hit >= 0) {
+          selectRecord(hit);
+        } else {
+          const banner = $("mobile-pick-banner");
+          if (banner) banner.hidden = true;
+        }
+      }
+      if (e.touches.length === 0) {
+        touchState.mode = "none";
+        touchState.pinchDist = 0;
+      }
+    });
   }
 
   function showTooltip(idx, mx, my, w, h) {
