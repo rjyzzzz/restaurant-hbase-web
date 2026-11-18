@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>上海市餐饮空间分布与 HBase 存储可视化</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- 顶部栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-dot"></div>
+        <div>
+          <h1>上海市餐饮空间分布与 HBase 存储可视化</h1>
+          <p class="subtitle">78,018 条全量 HBase 导出记录 · 多维筛选高亮 · RowKey 与列族解剖</p>
+        </div>
+      </div>
+
+      <div class="presets" id="presets">
+        <button class="preset-btn active" data-preset="all">🌐 全部 78,018 点</button>
+        <button class="preset-btn" data-preset="baoshan_seafood">🐟 宝山区 × 海鲜</button>
+        <button class="preset-btn" data-preset="huangpu_western">🍷 原黄浦 × 西餐</button>
+        <button class="preset-btn" data-preset="japanese_gubei">🍣 闵行/长宁 × 料理</button>
+        <button class="preset-btn" data-preset="luxury">💎 高档与奢华 (&gt;200元)</button>
+      </div>
+
+      <div class="top-actions">
+        <span class="status-pill" id="hbase-status">数据加载中...</span>
+        <select id="basemap-select" class="select-sm" title="切换底图">
+          <option value="amap_dark">底图：高德暗夜</option>
+          <option value="amap_light">底图：高德亮色</option>
+          <option value="osm">底图：OSM 街道</option>
+          <option value="offline">底图：纯离线极简</option>
+        </select>
+        <button id="btn-fit-match" class="btn-sm" title="缩放到当前筛选结果">定位高亮区</button>
+        <button id="btn-reset-view" class="btn-sm">重置上海视野</button>
+      </div>
+    </header>
+
+    <!-- 主体三栏 -->
+    <main class="workspace">
+      <!-- 左侧筛选栏 -->
+      <aside class="sidebar left-panel">
+        <section class="card">
+          <div class="card-head">
+            <h2>显示与地图图层</h2>
+          </div>
+          <div class="mode-switch">
+            <label class="radio-chip">
+              <input type="radio" name="displayMode" value="highlight" checked />
+              <span>高亮聚焦（背景压暗）</span>
+            </label>
+            <label class="radio-chip">
+              <input type="radio" name="displayMode" value="only" />
+              <span>仅显示命中点</span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <label><input type="checkbox" id="chk-autofit" checked /> 筛选后自动飞向目标区</label>
+          </div>
+          <div class="toggle-row">
+            <label><input type="checkbox" id="chk-landmarks" checked /> 显示 4 处地标与研究半径圈</label>
+          </div>
+          <div class="toggle-row">
+            <label><input type="checkbox" id="chk-labels" checked /> 显示行政区名称标注</label>
+          </div>
+          <div class="slider-row">
+            <span>高亮点击半径</span>
+            <input type="range" id="rng-point-size" min="1.5" max="6" step="0.5" value="3.0" />
+            <span id="val-point-size">3.0px</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>行政区筛选（17 区）</h2>
+            <div class="mini-actions">
+              <button class="link-btn" id="btn-dist-all">全选</button>
+              <button class="link-btn" id="btn-dist-clear">清空</button>
+            </div>
+          </div>
+          <p class="hint">点选可多选；含原始数据里的老卢湾、老闸北</p>
+          <div class="chip-grid" id="district-list"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>菜系品类（28 类 · 按颜色区分）</h2>
+            <div class="mini-actions">
+              <button class="link-btn" id="btn-cat-all">全选</button>
+              <button class="link-btn" id="btn-cat-clear">清空</button>
+            </div>
+          </div>
+          <input type="text" id="cat-search" class="input-sm" placeholder="搜索菜系（如：海鲜、西餐、川菜）..." />
+          <div class="chip-grid cat-grid" id="category-list"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>价格与口碑过滤</h2>
+            <button class="link-btn" id="btn-filter-reset">重置条件</button>
+          </div>
+          <div class="chip-grid" id="price-level-list"></div>
+          <div class="range-inputs">
+            <label>人均 ≥ <input type="number" id="inp-min-price" min="0" placeholder="0" /></label>
+            <label>人均 ≤ <input type="number" id="inp-max-price" min="0" placeholder="不限" /></label>
+          </div>
+          <div class="range-inputs">
+            <label>点评 ≥ <input type="number" id="inp-min-reviews" min="0" placeholder="0" /></label>
+            <label class="inline-check"><input type="checkbox" id="chk-usable-only" /> 仅有效(is_usable=1)</label>
+          </div>
+        </section>
+      </aside>
+
+      <!-- 中央交互地图 -->
+      <section class="map-stage">
+        <canvas id="map-canvas"></canvas>
+
+        <!-- 顶部悬浮匹配条 -->
+        <div class="map-hud-top">
+          <div class="hud-badge">
+            <span class="hud-label">当前高亮命中</span>
+            <strong id="hud-matched">78,018</strong>
+            <span class="hud-sub" id="hud-ratio">/ 78,018 条 (100.0%)</span>
+          </div>
+          <div class="hud-badge" id="hud-filter-desc">全部行政区 · 全部菜系</div>
+          <div class="hud-badge subtle" id="hud-tile-note">视野：上海市域（另有 9 条漂移坐标）</div>
+        </div>
+
+        <!-- 缩放控件 -->
+        <div class="map-controls">
+          <button id="btn-zoom-in" title="放大">+</button>
+          <button id="btn-zoom-out" title="缩小">−</button>
+        </div>
+
+        <!-- 比例尺与坐标 -->
+        <div class="map-hud-bottom-right">
+          <div class="scale-bar"><span id="scale-label">5 km</span><div class="scale-line" id="scale-line"></div></div>
+          <div class="coord-readout" id="coord-readout">121.4737°E, 31.2304°N</div>
+        </div>
+
+        <!-- 菜系颜色图例 -->
+        <div class="map-legend" id="map-legend">
+          <div class="legend-head">
+            <span>菜系图例（点击单选/取消）</span>
+            <button class="link-btn" id="btn-legend-toggle">收起</button>
+          </div>
+          <div class="legend-items" id="legend-items"></div>
+        </div>
+
+        <!-- 悬停提示 -->
+        <div class="tooltip" id="map-tooltip" hidden></div>
+
+        <!-- 加载遮罩 -->
+        <div class="loading-overlay" id="loading-overlay">
+          <div class="spinner"></div>
+          <div>正在从 HBase 导出加载 78,018 条餐饮坐标...</div>
+        </div>
+      </section>
+
+      <!-- 右侧统计与 HBase 检视面板 -->
+      <aside class="sidebar right-panel">
+        <section class="card">
+          <div class="card-head">
+            <h2>当前筛选实时画像</h2>
+          </div>
+          <div class="kpi-grid">
+            <div class="kpi-box">
+              <span>命中记录数</span>
+              <strong id="stat-count">-</strong>
+              <small id="stat-share">-</small>
+            </div>
+            <div class="kpi-box">
+              <span>区位商 (LQ)</span>
+              <strong id="stat-lq">-</strong>
+              <small id="stat-lq-note">单区+单品类时计算</small>
+            </div>
+            <div class="kpi-box">
+              <span>有效消费中位数</span>
+              <strong id="stat-median">-</strong>
+              <small id="stat-usable-n">-</small>
+            </div>
+            <div class="kpi-box">
+              <span>有效消费均值 / 最高</span>
+              <strong id="stat-mean">-</strong>
+              <small id="stat-max">-</small>
+            </div>
+          </div>
+
+          <div class="sub-chart">
+            <h3>价位档分布（命中样本）</h3>
+            <div id="chart-price-bars" class="bar-list"></div>
+          </div>
+
+          <div class="sub-chart">
+            <h3 id="chart-top-title">TOP 品类分布（命中样本）</h3>
+            <div id="chart-top-bars" class="bar-list"></div>
+          </div>
+        </section>
+
+        <section class="card hbase-card">
+          <div class="card-head">
+            <h2>HBase 存储结构检视</h2>
+            <button class="btn-xs" id="btn-live-get">HBase 实时 Get</button>
+          </div>
+          <p class="hint">点击地图上任意餐厅点，实时拆解它的 RowKey 与 11 个 Cell</p>
+
+          <div id="inspector-empty" class="inspector-empty">尚未选中点位</div>
+          <div id="inspector-body" hidden>
+            <div class="rowkey-box">
+              <div class="rk-label">RowKey（15 位定长字典序）</div>
+              <div class="rk-segments" id="rk-segments"></div>
+              <div class="rk-explain" id="rk-explain"></div>
+            </div>
+
+            <div class="region-badge" id="rk-region"></div>
+
+            <table class="cell-table">
+              <thead>
+                <tr><th>列族 CF</th><th>列 CQ</th><th>值 (Value)</th></tr>
+              </thead>
+              <tbody id="cell-tbody"></tbody>
+            </table>
+
+            <div id="live-hbase-box" class="live-hbase-box" hidden></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
