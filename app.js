@@ -137,6 +137,42 @@
     return lng >= 120.8 && lng <= 122.2 && lat >= 30.6 && lat <= 31.9;
   }
 
+  // 数据集与 4 处地标均为 WGS-84；高德底图使用 GCJ-02，绘制时自动纠偏对齐（原始 Cell 值保持不变）
+  function wgs84ToGcj02(lng, lat) {
+    if (lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271) {
+      return [lng, lat];
+    }
+    const a = 6378245.0;
+    const ee = 0.00669342162296594323;
+    const x = lng - 105.0;
+    const y = lat - 35.0;
+    let dLat = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+    dLat += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+    dLat += ((20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin((y / 3.0) * Math.PI)) * 2.0) / 3.0;
+    dLat += ((160.0 * Math.sin((y / 12.0) * Math.PI) + 320.0 * Math.sin((y * Math.PI) / 30.0)) * 2.0) / 3.0;
+
+    let dLng = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+    dLng += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+    dLng += ((20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin((x / 3.0) * Math.PI)) * 2.0) / 3.0;
+    dLng += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300.0 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0;
+
+    const radLat = (lat / 180.0) * Math.PI;
+    let magic = Math.sin(radLat);
+    magic = 1 - ee * magic * magic;
+    const sqrtMagic = Math.sqrt(magic);
+    dLat = (dLat * 180.0) / (((a * (1 - ee)) / (magic * sqrtMagic)) * Math.PI);
+    dLng = (dLng * 180.0) / ((a / sqrtMagic) * Math.cos(radLat) * Math.PI);
+    return [lng + dLng, lat + dLat];
+  }
+
+  function needsGcj02() {
+    return state.basemap === "amap_dark" || state.basemap === "amap_light";
+  }
+
+  function toMapCoord(lng, lat) {
+    return needsGcj02() ? wgs84ToGcj02(lng, lat) : [lng, lat];
+  }
+
   function setMobileTab(tab) {
     document.body.dataset.mobileTab = tab;
     document.querySelectorAll(".mobile-tab-btn").forEach((b) => {
@@ -247,14 +283,7 @@
     state.screenY = new Float32Array(n);
     state.catBuckets = state.categories.map(() => []);
 
-    for (let i = 0; i < n; i++) {
-      const r = state.records[i];
-      state.normX[i] = (r[7] + 180) / 360;
-      const clamped = Math.max(-85.0511, Math.min(85.0511, r[8]));
-      const s = Math.sin((clamped * Math.PI) / 180);
-      state.normY[i] = 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
-    }
-
+    recomputeProjectionCoords();
     updateBasemapClasses();
 
     state.catColors = state.categories.map(
@@ -285,6 +314,25 @@
 
     renderFilterChips();
     renderLegend();
+  }
+
+  function recomputeProjectionCoords() {
+    const n = state.records.length;
+    const useGcj = needsGcj02();
+    for (let i = 0; i < n; i++) {
+      const r = state.records[i];
+      let lng = r[7];
+      let lat = r[8];
+      if (useGcj) {
+        const g = wgs84ToGcj02(lng, lat);
+        lng = g[0];
+        lat = g[1];
+      }
+      state.normX[i] = (lng + 180) / 360;
+      const clamped = Math.max(-85.0511, Math.min(85.0511, lat));
+      const s = Math.sin((clamped * Math.PI) / 180);
+      state.normY[i] = 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+    }
   }
 
   function updateHBaseStatus(st) {
@@ -566,8 +614,7 @@
     const h = dom.canvas.clientHeight || Math.round((window.innerHeight || 600) * 0.72);
     const padLng = Math.max(0.02, (maxLng - minLng) * 0.22);
     const padLat = Math.max(0.02, (maxLat - minLat) * 0.22);
-    const cLng = (minLng + maxLng) / 2;
-    const cLat = (minLat + maxLat) / 2;
+    const [cLng, cLat] = toMapCoord((minLng + maxLng) / 2, (minLat + maxLat) / 2);
 
     let bestZ = 12.5;
     for (let z = 14; z >= 9; z -= 0.25) {
@@ -930,9 +977,10 @@
   function drawLandmarks(ctx, w, h, z, cWx, cWy) {
     ctx.save();
     state.landmarks.forEach((lm) => {
-      const sx = w / 2 + (lngToWorldX(lm.lng, z) - cWx);
-      const sy = h / 2 + (latToWorldY(lm.lat, z) - cWy);
-      const rPx = (lm.radius_km * 1000) / metersPerPixel(lm.lat, z);
+      const [mlng, mlat] = toMapCoord(lm.lng, lm.lat);
+      const sx = w / 2 + (lngToWorldX(mlng, z) - cWx);
+      const sy = h / 2 + (latToWorldY(mlat, z) - cWy);
+      const rPx = (lm.radius_km * 1000) / metersPerPixel(mlat, z);
 
       ctx.strokeStyle = "rgba(251, 191, 36, 0.78)";
       ctx.fillStyle = "rgba(251, 191, 36, 0.06)";
@@ -963,8 +1011,9 @@
     ctx.textAlign = "center";
     state.districtCentroids.forEach((dc, idx) => {
       if (dc.count < 20 && z < 11.2) return;
-      const sx = w / 2 + (lngToWorldX(dc.lng, z) - cWx);
-      const sy = h / 2 + (latToWorldY(dc.lat, z) - cWy);
+      const [dlng, dlat] = toMapCoord(dc.lng, dc.lat);
+      const sx = w / 2 + (lngToWorldX(dlng, z) - cWx);
+      const sy = h / 2 + (latToWorldY(dlat, z) - cWy);
       if (sx < 20 || sx > w - 20 || sy < 20 || sy > h - 20) return;
       const isSelected = state.selectedDistricts.has(idx);
       const label = z >= 11.5 ? `${dc.name} (${dc.count})` : dc.name;
@@ -1145,6 +1194,7 @@
 
     dom.basemapSelect.addEventListener("change", () => {
       state.basemap = dom.basemapSelect.value;
+      recomputeProjectionCoords();
       updateBasemapClasses();
       requestDraw();
     });
