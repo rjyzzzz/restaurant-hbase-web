@@ -727,6 +727,12 @@
     }
   }
 
+  function maxTileZoom(provider) {
+    if (provider === "esri_street") return 13;
+    if (provider === "esri_dark") return 16;
+    return 18;
+  }
+
   let drawQueued = false;
   function requestDraw() {
     if (drawQueued) return;
@@ -754,7 +760,7 @@
     tCtx.clearRect(0, 0, w, h);
 
     if (state.basemap !== "offline") {
-      const tz = Math.max(4, Math.min(18, Math.round(z)));
+      const tz = Math.max(4, Math.min(maxTileZoom(state.basemap), Math.round(z)));
       const tileScale = Math.pow(2, z - tz);
       const tilePx = 256 * tileScale;
       const cTx = lngToWorldX(state.view.lng, tz);
@@ -770,11 +776,25 @@
         if (tx < 0 || tx > maxTile) continue;
         for (let ty = minY; ty <= maxY; ty++) {
           if (ty < 0 || ty > maxTile) continue;
+          const dx = w / 2 + (tx * 256 - cTx) * tileScale;
+          const dy = h / 2 + (ty * 256 - cTy) * tileScale;
           const entry = getTile(state.basemap, tz, tx, ty);
           if (entry && entry.status === "ok") {
-            const dx = w / 2 + (tx * 256 - cTx) * tileScale;
-            const dy = h / 2 + (ty * 256 - cTy) * tileScale;
             tCtx.drawImage(entry.img, dx, dy, tilePx + 0.5, tilePx + 0.5);
+          } else {
+            // 新层瓦片加载中时用缓存的父级瓦片补位，避免缩放闪烁空白
+            for (let dz = 1; dz <= 3 && tz - dz >= 4; dz++) {
+              const pz = tz - dz;
+              const div = 1 << dz;
+              const pEntry = state.tileCache.get(`${state.basemap}:${pz}:${tx >> dz}:${ty >> dz}`);
+              if (pEntry && pEntry.status === "ok") {
+                const sub = 256 / div;
+                const sx = (tx % div) * sub;
+                const sy = (ty % div) * sub;
+                tCtx.drawImage(pEntry.img, sx, sy, sub, sub, dx, dy, tilePx + 0.5, tilePx + 0.5);
+                break;
+              }
+            }
           }
         }
       }
