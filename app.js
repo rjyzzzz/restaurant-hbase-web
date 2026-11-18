@@ -648,9 +648,12 @@
       const s = ((x + y) % 4) + 1;
       return `https://webrd0${s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=${x}&y=${y}&z=${z}`;
     }
-    if (provider === "osm") {
-      const s = ["a", "b", "c"][(x + y) % 3];
-      return `https://${s}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
+    if (provider === "carto_voyager") {
+      const s = ["a", "b", "c", "d"][(x + y) % 4];
+      return `https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`;
+    }
+    if (provider === "esri_sat") {
+      return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
     }
     return null;
   }
@@ -685,7 +688,7 @@
 
   function updateBasemapClasses() {
     if (!dom.mapStage || !dom.tileCanvas) return;
-    const isLight = state.basemap === "amap_light" || state.basemap === "osm";
+    const isLight = state.basemap === "amap_light" || state.basemap === "carto_voyager";
     dom.mapStage.classList.toggle("basemap-light", isLight);
     dom.tileCanvas.classList.toggle("dark-filter", state.basemap === "amap_dark");
     state.lastTileViewKey = "";
@@ -856,7 +859,7 @@
 
     const drawBg = state.displayMode === "highlight" && hasFilter;
     if (drawBg) {
-      ctx.fillStyle = state.basemap === "amap_light" || state.basemap === "osm"
+      ctx.fillStyle = state.basemap === "amap_light" || state.basemap === "carto_voyager"
         ? "rgba(100, 116, 139, 0.14)"
         : "rgba(148, 163, 184, 0.13)";
       ctx.beginPath();
