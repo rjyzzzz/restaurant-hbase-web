@@ -2,6 +2,6 @@
 setlocal
 cd /d "%~dp0"
 echo Starting Shanghai Restaurant HBase Spatial Visualization Server...
-python server.py --port 8080
+python server.py --port 18080
 pause
 endlocal

@@ -179,7 +179,7 @@ class AppHandler(BaseHTTPRequestHandler):
 def main() -> int:
     parser = argparse.ArgumentParser(description="上海餐饮 HBase 空间可视化服务")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -188,8 +188,19 @@ def main() -> int:
     print("=" * 68)
     load_cached_data()
 
-    httpd = ThreadingHTTPServer((args.host, args.port), AppHandler)
-    url = f"http://{args.host}:{args.port}/"
+    httpd = None
+    bound_port = args.port
+    for candidate in range(args.port, args.port + 10):
+        try:
+            httpd = ThreadingHTTPServer((args.host, candidate), AppHandler)
+            bound_port = candidate
+            break
+        except OSError:
+            continue
+    if httpd is None:
+        raise RuntimeError(f"端口 {args.port}..{args.port + 9} 均被占用，请使用 --port 指定其他端口")
+
+    url = f"http://{args.host}:{bound_port}/"
     print(f"  [服务启动] {url}")
     print("  [提示] 按 Ctrl+C 可停止服务")
     print("=" * 68)
