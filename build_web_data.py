@@ -24,7 +24,7 @@ OUT_PATH = WEB_DATA_DIR / "restaurants_compact.json"
 
 PRICE_LEVELS = ["未知", "平价", "中档", "偏高档", "高档", "奢华"]
 
-# 来自 report/数据来源与复算索引.md 的 4 处验证地标
+# 来自 report/数据来源与复算索引.md 与公开地标核对的 5 处验证地标（统一为 WGS-84 坐标）
 LANDMARKS = [
     {
         "id": "jiangyang",
@@ -57,14 +57,24 @@ LANDMARKS = [
         "desc": "原黄浦区开埠与租界历史地标（1 km 圈内西餐占比 10.60% vs 圈外 6.01%）",
     },
     {
-        "id": "gumei",
-        "name": "闵行古美公园",
+        "id": "gubei",
+        "name": "长宁古北新区 (黄金城道)",
+        "district": "长宁区",
+        "category": "本菜",
+        "radius_km": 1.5,
+        "lng": 121.402,
+        "lat": 31.195,
+        "desc": "涉外日本社区地标（1.5 km 圈内「本菜/日本菜*」占比 21.20% vs 圈外 8.32%）",
+    },
+    {
+        "id": "hongquan",
+        "name": "闵行虹泉路韩国街",
         "district": "闵行区",
         "category": "料理",
         "radius_km": 1.5,
-        "lng": 121.38806,
-        "lat": 31.14428,
-        "desc": "政策外溢对照点（1.5 km 圈内料理 3.25% vs 圈外 3.91%，未见明显集聚）",
+        "lng": 121.373883,
+        "lat": 31.17215,
+        "desc": "韩国料理集聚街区（1.5 km 圈内「料理/韩国料理*」占比 15.95% vs 圈外 2.24%）",
     },
 ]
 

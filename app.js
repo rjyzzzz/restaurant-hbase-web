@@ -38,16 +38,53 @@
     "#fb7185", "#2dd4bf", "#f97316", "#84cc16", "#60a5fa",
   ];
 
-  // 原始数据集保留截断/错别字原值，搜索时补充常见全称别名
+  // UI 友好名称映射（* 表示结合截断规律、价位与空间分布推断；HBase Cell 原值保持不变）
+  const CATEGORY_DISPLAY_MAP = {
+    "啡厅": "咖啡厅 (啡厅)",
+    "常菜": "家常菜 (常菜)",
+    "助餐": "自助餐 (助餐)",
+    "亚菜": "东南亚菜 (亚菜)",
+    "湾菜": "台湾菜 (湾菜)",
+    "疆菜": "新疆菜 (疆菜)",
+    "午茶": "下午茶 (午茶)",
+    "本菜": "日本菜* (本菜)",
+    "料理": "韩国料理* (料理)",
+    "浙菜": "本帮江浙菜* (浙菜)",
+  };
+
+  const CATEGORY_TOOLTIP_MAP = {
+    "本菜": "原始截断值：本菜。据最后2字截断规则、人均中位111元及古北高集聚推断为「日本菜」",
+    "料理": "原始截断值：料理。据虹泉路韩国街1.5km圈内占比15.95%(圈外2.24%)推断为「韩国料理」",
+    "浙菜": "原始截断值：浙菜。据平台一级分类与本地占比特征推断包含「本帮江浙菜」",
+    "北菜": "原始 2 字截断简写，含义待考（可能为东北菜/西北菜）",
+    "西菜": "原始 2 字截断简写，含义待考（可能为江西菜/陕西菜/广西菜）",
+    "南菜": "原始 2 字截断简写，含义待考（可能为云南菜/湖南菜）",
+    "州菜": "原始 2 字截断简写，含义待考（可能为贵州菜/杭州菜/潮州菜）",
+  };
+
+  function displayCat(raw) {
+    return CATEGORY_DISPLAY_MAP[raw] || raw;
+  }
+
+  // 原始数据集保留截断原值，搜索时补充全称与常见别名
   const CATEGORY_SEARCH_ALIASES = {
+    "快餐": "小吃快餐",
+    "甜点": "面包甜点",
+    "美食": "其他美食",
+    "浙菜": "本帮江浙菜 本帮菜 浙江菜",
     "啡厅": "咖啡 咖啡厅",
+    "本菜": "日本菜 日料 日本料理",
+    "北菜": "东北菜 西北菜",
+    "龙虾": "小龙虾",
+    "料理": "韩国料理 韩餐 韩国菜",
     "常菜": "家常菜",
-    "助餐": "自助餐",
     "亚菜": "东南亚菜",
+    "助餐": "自助餐",
     "湾菜": "台湾菜",
     "疆菜": "新疆菜",
-    "本菜": "本帮菜",
-    "北菜": "东北菜",
+    "西菜": "江西菜 陕西菜 广西菜",
+    "南菜": "云南菜 湖南菜",
+    "州菜": "贵州菜 杭州菜 潮州菜",
     "午茶": "下午茶",
   };
 
@@ -92,6 +129,7 @@
     hoverIdx: -1,
     selectedIdx: -1,
     isStaticHost: false,
+    legendShowAll: false,
 
     // 缓存命中与屏幕坐标，供 O(N) 快速拾取与零开销投影
     matchedMask: null, // Uint8Array
@@ -197,6 +235,19 @@
     }
   }
 
+  function setLegendCollapsed(collapsed) {
+    dom.legendItems.style.display = collapsed ? "none" : "flex";
+    if (dom.mapLegend) dom.mapLegend.classList.toggle("is-collapsed", collapsed);
+    if (dom.btnLegendToggle) dom.btnLegendToggle.textContent = collapsed ? "展开" : "收起";
+    if (dom.btnLegendAll) dom.btnLegendAll.hidden = collapsed;
+  }
+
+  function hideMobileBanner() {
+    const banner = $("mobile-pick-banner");
+    if (banner) banner.hidden = true;
+    if (dom.mapStage) dom.mapStage.classList.remove("has-pick-banner");
+  }
+
   // ==================== 初始化 ====================
   async function init() {
     document.body.dataset.mobileTab = "map";
@@ -204,8 +255,7 @@
     bindEvents();
 
     if (window.innerWidth <= 900) {
-      dom.legendItems.style.display = "none";
-      $("btn-legend-toggle").textContent = "展开";
+      setLegendCollapsed(true);
     }
 
     try {
@@ -235,7 +285,7 @@
         const liveBtn = $("btn-live-get");
         if (liveBtn) {
           liveBtn.textContent = "仅支持快照";
-          liveBtn.title = "当前为静态网站托管模式（GitHub Pages），仅在本地运行 server.py + HBase 时支持实时 Get";
+          liveBtn.title = "当前为静态托管快照（hbase.wogress.site），仅在本地运行 server.py + HBase 时支持实时 Get";
         }
       }
     } catch (err) {
@@ -275,6 +325,7 @@
     dom.inpMaxPrice = $("inp-max-price");
     dom.inpMinReviews = $("inp-min-reviews");
     dom.chkUsableOnly = $("chk-usable-only");
+    dom.filterError = $("filter-error");
     dom.chkAutofit = $("chk-autofit");
     dom.chkLandmarks = $("chk-landmarks");
     dom.chkLabels = $("chk-labels");
@@ -284,7 +335,10 @@
     dom.hudRatio = $("hud-ratio");
     dom.hudFilterDesc = $("hud-filter-desc");
     dom.hudTileNote = $("hud-tile-note");
+    dom.mapLegend = $("map-legend");
     dom.legendItems = $("legend-items");
+    dom.btnLegendAll = $("btn-legend-all");
+    dom.btnLegendToggle = $("btn-legend-toggle");
     dom.tooltip = $("map-tooltip");
     dom.coordReadout = $("coord-readout");
     dom.scaleLabel = $("scale-label");
@@ -410,17 +464,19 @@
   }
 
   function renderCategoryChips() {
-    const q = dom.catSearch.value.trim();
+    const q = dom.catSearch.value.trim().toLowerCase();
     dom.categoryList.innerHTML = "";
     state.categories.forEach((c, idx) => {
+      const label = displayCat(c);
       const alias = CATEGORY_SEARCH_ALIASES[c] || "";
-      if (q && !c.includes(q) && !alias.includes(q)) return;
+      if (q && !c.toLowerCase().includes(q) && !label.toLowerCase().includes(q) && !alias.toLowerCase().includes(q)) return;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "chip" + (state.selectedCategories.has(idx) ? " selected" : "");
       btn.dataset.idx = idx;
+      if (CATEGORY_TOOLTIP_MAP[c]) btn.title = CATEGORY_TOOLTIP_MAP[c];
       btn.innerHTML = `<span class="color-dot" style="background:${state.catColors[idx]}"></span>` +
-        `<span>${c}</span><span class="cnt">${state.categoryCounts[idx].toLocaleString()}</span>`;
+        `<span>${label}</span><span class="cnt">${state.categoryCounts[idx].toLocaleString()}</span>`;
       btn.addEventListener("click", () => {
         toggleSetItem(state.selectedCategories, idx);
         clearPresetActive();
@@ -433,13 +489,14 @@
 
   function renderLegend() {
     dom.legendItems.innerHTML = "";
-    // 显示前 14 个高频菜系（其余可在左侧全量列表选）
-    const limit = Math.min(14, state.categories.length);
+    const limit = state.legendShowAll ? state.categories.length : Math.min(14, state.categories.length);
     for (let idx = 0; idx < limit; idx++) {
+      const raw = state.categories[idx];
       const item = document.createElement("span");
       item.className = "legend-item";
       item.dataset.idx = idx;
-      item.innerHTML = `<span class="color-dot" style="background:${state.catColors[idx]}"></span>${state.categories[idx]}`;
+      if (CATEGORY_TOOLTIP_MAP[raw]) item.title = CATEGORY_TOOLTIP_MAP[raw];
+      item.innerHTML = `<span class="color-dot" style="background:${state.catColors[idx]}"></span>${displayCat(raw)}`;
       item.addEventListener("click", () => {
         if (state.selectedCategories.size === 1 && state.selectedCategories.has(idx)) {
           state.selectedCategories.clear();
@@ -452,6 +509,10 @@
       });
       dom.legendItems.appendChild(item);
     }
+    if (dom.btnLegendAll) {
+      dom.btnLegendAll.textContent = state.legendShowAll ? "仅前14类" : `全部${state.categories.length}类`;
+    }
+    syncChipSelections();
   }
 
   function syncChipSelections() {
@@ -545,8 +606,7 @@
 
     // 若原选中点已被当前筛选排除，则同步切换详情面板并收起旧浮条
     if (state.selectedIdx < 0 || mask[state.selectedIdx] !== 1) {
-      const banner = $("mobile-pick-banner");
-      if (banner) banner.hidden = true;
+      hideMobileBanner();
       if (bestMatchedIdx >= 0) {
         selectRecord(bestMatchedIdx, false);
       } else {
@@ -574,8 +634,23 @@
       : [...state.selectedDistricts].map((i) => state.districts[i]).join("、");
     const cDesc = state.selectedCategories.size === 0 || state.selectedCategories.size === state.categories.length
       ? "全部菜系"
-      : [...state.selectedCategories].map((i) => state.categories[i]).join("、");
-    dom.hudFilterDesc.textContent = `${dDesc} · ${cDesc}`;
+      : [...state.selectedCategories].map((i) => displayCat(state.categories[i])).join("、");
+    const extraParts = [];
+    if (state.selectedPriceLevels.size > 0 && state.selectedPriceLevels.size < state.priceLevels.length) {
+      extraParts.push([...state.selectedPriceLevels].map((i) => state.priceLevels[i]).join("/"));
+    }
+    if (state.minPrice !== null || state.maxPrice !== null) {
+      const lo = state.minPrice !== null ? state.minPrice : 0;
+      const hi = state.maxPrice !== null ? state.maxPrice : "不限";
+      extraParts.push(`人均${lo}~${hi}元`);
+    }
+    if (state.minReviews !== null) {
+      extraParts.push(`点评≥${state.minReviews}`);
+    }
+    if (state.usableOnly) {
+      extraParts.push("仅有效样本");
+    }
+    dom.hudFilterDesc.textContent = [dDesc, cDesc, ...extraParts].join(" · ");
 
     $("stat-count").textContent = count.toLocaleString();
     $("stat-share").textContent = `占全市 ${pct}%`;
@@ -638,11 +713,14 @@
     const pairs = [];
     if (showDistTop) {
       for (let i = 0; i < state.districts.length; i++) {
-        if (distHit[i] > 0) pairs.push({ name: state.districts[i], val: distHit[i], color: "#38bdf8" });
+        if (distHit[i] > 0) pairs.push({ name: state.districts[i], label: state.districts[i], val: distHit[i], color: "#38bdf8" });
       }
     } else {
       for (let i = 0; i < state.categories.length; i++) {
-        if (catHit[i] > 0) pairs.push({ name: state.categories[i], val: catHit[i], color: state.catColors[i] });
+        if (catHit[i] > 0) {
+          const raw = state.categories[i];
+          pairs.push({ name: raw, label: displayCat(raw), val: catHit[i], color: state.catColors[i] });
+        }
       }
     }
     pairs.sort((a, b) => b.val - a.val);
@@ -651,7 +729,7 @@
     $("chart-top-bars").innerHTML = top6.length
       ? top6.map((p) => {
           const w = (p.val / maxTop) * 100;
-          return `<div class="bar-row"><span>${p.name}</span><div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${p.color}"></div></div><span class="bar-val">${p.val.toLocaleString()}</span></div>`;
+          return `<div class="bar-row"><span title="${p.label}">${p.label}</span><div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${p.color}"></div></div><span class="bar-val">${p.val.toLocaleString()}</span></div>`;
         }).join("")
       : `<div class="hint">暂无命中记录</div>`;
   }
@@ -1001,7 +1079,7 @@
     }
     ctx.globalAlpha = 1;
 
-    // 5. 4 处地标与研究半径圈
+    // 5. 5 处地标与研究半径圈
     if (state.showLandmarks) {
       drawLandmarks(ctx, w, h, z, cWx, cWy);
     }
@@ -1072,8 +1150,12 @@
       ctx.fill();
 
       ctx.font = "600 11px 'Microsoft YaHei', sans-serif";
+      const label = `${lm.name} (${lm.radius_km}km)`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(11, 17, 32, 0.88)";
+      ctx.strokeText(label, sx + 7, sy - 6);
       ctx.fillStyle = "#fde68a";
-      ctx.fillText(`${lm.name} (${lm.radius_km}km)`, sx + 7, sy - 6);
+      ctx.fillText(label, sx + 7, sy - 6);
     });
     ctx.restore();
   }
@@ -1194,7 +1276,8 @@
     const priceDesc = avgPrice > 0
       ? `9,999,998 − ${avgPrice} = ${revStr}（价格越高字典序越靠前）`
       : `价格缺失 → 固定 9,999,999（严格排在所有已知价格之后）`;
-    $("rk-explain").textContent = `${dCode}=${dName} · ${cCode}=${cName} · ${priceDesc} · 序号 ${seqStr}`;
+    const cLabel = displayCat(cName);
+    $("rk-explain").textContent = `${dCode}=${dName} · ${cCode}=${cLabel} · ${priceDesc} · 序号 ${seqStr}`;
 
     // 计算预分区 SPLITS = ['04', '07', '10', '13']
     const dNum = parseInt(dCode, 10);
@@ -1230,11 +1313,26 @@
     const mpbInfo = $("mpb-info");
     if (banner && mpbInfo && showMobileBanner) {
       const priceText = avgPrice > 0 ? `${avgPrice}元` : "价未知";
-      mpbInfo.textContent = `${dName} · ${cName} · ${priceText} (${rk})`;
+      mpbInfo.textContent = `${dName} · ${cLabel} · ${priceText} (${rk})`;
       banner.hidden = false;
+      if (dom.mapStage) dom.mapStage.classList.add("has-pick-banner");
     }
 
     requestDraw();
+  }
+
+  function stepMatchedRecord(delta) {
+    const n = state.records.length;
+    if (n === 0 || state.matchedCount === 0) return;
+    const mask = state.matchedMask;
+    const start = state.selectedIdx >= 0 ? state.selectedIdx : 0;
+    for (let step = 1; step <= n; step++) {
+      const idx = (start + delta * step + n) % n;
+      if (mask[idx] === 1) {
+        selectRecord(idx, false);
+        return;
+      }
+    }
   }
 
   // ==================== 交互与事件绑定 ====================
@@ -1253,6 +1351,20 @@
     const mpbDetail = $("btn-mpb-detail");
     if (mpbDetail) {
       mpbDetail.addEventListener("click", () => setMobileTab("stats"));
+    }
+
+    const mpbClose = $("btn-mpb-close");
+    if (mpbClose) {
+      mpbClose.addEventListener("click", hideMobileBanner);
+    }
+
+    const prevRecBtn = $("btn-prev-record");
+    if (prevRecBtn) {
+      prevRecBtn.addEventListener("click", () => stepMatchedRecord(-1));
+    }
+    const nextRecBtn = $("btn-next-record");
+    if (nextRecBtn) {
+      nextRecBtn.addEventListener("click", () => stepMatchedRecord(1));
     }
 
     // 预设场景按钮
@@ -1331,13 +1443,56 @@
 
     dom.catSearch.addEventListener("input", renderCategoryChips);
 
+    const clearNumericErrors = () => {
+      dom.inpMinPrice.classList.remove("invalid");
+      dom.inpMaxPrice.classList.remove("invalid");
+      dom.inpMinReviews.classList.remove("invalid");
+      if (dom.filterError) {
+        dom.filterError.hidden = true;
+        dom.filterError.textContent = "";
+      }
+    };
+
     const onNumericChange = () => {
-      const minP = dom.inpMinPrice.value.trim();
-      const maxP = dom.inpMaxPrice.value.trim();
-      const minR = dom.inpMinReviews.value.trim();
-      state.minPrice = minP === "" ? null : Number(minP);
-      state.maxPrice = maxP === "" ? null : Number(maxP);
-      state.minReviews = minR === "" ? null : Number(minR);
+      clearNumericErrors();
+      const rawMinP = dom.inpMinPrice.value.trim();
+      const rawMaxP = dom.inpMaxPrice.value.trim();
+      const rawMinR = dom.inpMinReviews.value.trim();
+
+      const errs = [];
+      let minP = rawMinP === "" ? null : Number(rawMinP);
+      let maxP = rawMaxP === "" ? null : Number(rawMaxP);
+      let minR = rawMinR === "" ? null : Number(rawMinR);
+
+      if (minP !== null && (Number.isNaN(minP) || minP < 0)) {
+        dom.inpMinPrice.classList.add("invalid");
+        errs.push("人均下限不能为负数（已忽略）");
+        minP = null;
+      }
+      if (maxP !== null && (Number.isNaN(maxP) || maxP < 0)) {
+        dom.inpMaxPrice.classList.add("invalid");
+        errs.push("人均上限不能为负数（已忽略）");
+        maxP = null;
+      }
+      if (minR !== null && (Number.isNaN(minR) || minR < 0)) {
+        dom.inpMinReviews.classList.add("invalid");
+        errs.push("点评数下限不能为负数（已忽略）");
+        minR = null;
+      }
+      if (minP !== null && maxP !== null && minP > maxP) {
+        dom.inpMinPrice.classList.add("invalid");
+        dom.inpMaxPrice.classList.add("invalid");
+        errs.push("人均消费下限不能大于上限");
+      }
+
+      if (errs.length > 0 && dom.filterError) {
+        dom.filterError.textContent = errs.join("；");
+        dom.filterError.hidden = false;
+      }
+
+      state.minPrice = minP;
+      state.maxPrice = maxP;
+      state.minReviews = minR;
       state.usableOnly = dom.chkUsableOnly.checked;
       clearPresetActive();
       applyFilters("none");
@@ -1348,17 +1503,23 @@
     dom.chkUsableOnly.addEventListener("change", onNumericChange);
 
     $("btn-filter-reset").addEventListener("click", () => {
+      clearNumericErrors();
       applyPreset("all");
       document.querySelectorAll(".preset-btn").forEach((b) => {
         b.classList.toggle("active", b.dataset.preset === "all");
       });
     });
 
+    if (dom.btnLegendAll) {
+      dom.btnLegendAll.addEventListener("click", () => {
+        state.legendShowAll = !state.legendShowAll;
+        renderLegend();
+      });
+    }
+
     $("btn-legend-toggle").addEventListener("click", () => {
-      const box = dom.legendItems;
-      const hidden = box.style.display === "none";
-      box.style.display = hidden ? "flex" : "none";
-      $("btn-legend-toggle").textContent = hidden ? "收起" : "展开";
+      const hidden = dom.legendItems.style.display === "none";
+      setLegendCollapsed(!hidden);
     });
 
     $("btn-live-get").addEventListener("click", async () => {
@@ -1367,14 +1528,14 @@
       const box = $("live-hbase-box");
       box.hidden = false;
       if (state.isStaticHost) {
-        box.textContent = "[静态托管模式] 当前访问的是 GitHub Pages 静态快照，无在线 HBase 后端服务。\n上方已完整展示该条记录从 HBase 导出的 RowKey 分段与 11 个 Cell 结构；在本地启动 server.py + HBase 后即可实时 Get。";
+        box.textContent = "[静态托管模式] 当前访问的是静态托管快照（hbase.wogress.site），无在线 HBase 后端服务。\n上方已完整展示该条记录从 HBase 导出的 RowKey 分段与 11 个 Cell 结构；在本地启动 server.py + HBase 后即可实时 Get。";
         return;
       }
       box.textContent = `正在向本地 HBase 查询 RowKey=${rk} ...`;
       try {
         const resp = await fetch(`/api/hbase/live-row?rowkey=${encodeURIComponent(rk)}`);
         if (!resp.ok) {
-          box.textContent = "[提示] 当前为静态网站托管模式（GitHub Pages），无本地 HBase 后端服务。\n上方已完整展示该条记录从 HBase 导出的 RowKey 分段与 11 个 Cell 结构。";
+          box.textContent = "[提示] 当前为静态托管模式（hbase.wogress.site），无本地 HBase 后端服务。\n上方已完整展示该条记录从 HBase 导出的 RowKey 分段与 11 个 Cell 结构。";
           return;
         }
         const data = await resp.json();
@@ -1552,8 +1713,7 @@
         if (hit >= 0) {
           selectRecord(hit);
         } else {
-          const banner = $("mobile-pick-banner");
-          if (banner) banner.hidden = true;
+          hideMobileBanner();
         }
       }
       if (e.touches.length === 0) {
@@ -1568,7 +1728,7 @@
   function showTooltip(idx, mx, my, w, h) {
     const r = state.records[idx];
     const dName = state.districts[r[1]];
-    const cName = state.categories[r[2]];
+    const cName = displayCat(state.categories[r[2]]);
     const color = state.catColors[r[2]];
     const priceText = r[3] > 0 ? `${r[3]} 元 (${state.priceLevels[r[5]]})` : "人均未知";
 
@@ -1582,8 +1742,31 @@
       <div style="color:#94a3b8;font-size:11px;margin-top:2px">RowKey: ${r[0]}（点击解剖 Cell）</div>
     `;
     dom.tooltip.hidden = false;
-    const left = mx + 14 + 210 > w ? mx - 215 : mx + 14;
-    const top = my + 14 + 95 > h ? my - 100 : my + 14;
+    const tipW = dom.tooltip.offsetWidth || 220;
+    const tipH = dom.tooltip.offsetHeight || 96;
+    let left = mx + 14 + tipW > w ? mx - tipW - 10 : mx + 14;
+    let top = my + 14 + tipH > h ? my - tipH - 10 : my + 14;
+    left = Math.max(8, Math.min(w - tipW - 8, left));
+    top = Math.max(8, Math.min(h - tipH - 8, top));
+
+    // 避让左下角菜系图例，避免盖住「收起/全部」按钮
+    if (dom.mapLegend && dom.mapStage) {
+      const sRect = dom.mapStage.getBoundingClientRect();
+      const lRect = dom.mapLegend.getBoundingClientRect();
+      const lx1 = lRect.left - sRect.left;
+      const ly1 = lRect.top - sRect.top;
+      const lx2 = lRect.right - sRect.left;
+      const ly2 = lRect.bottom - sRect.top;
+      const overlapsLegend = left < lx2 + 6 && left + tipW > lx1 - 6 && top < ly2 + 6 && top + tipH > ly1 - 6;
+      if (overlapsLegend) {
+        if (ly1 - tipH - 8 >= 8) {
+          top = ly1 - tipH - 8;
+        } else if (lx2 + 8 + tipW <= w - 8) {
+          left = lx2 + 8;
+        }
+      }
+    }
+
     dom.tooltip.style.left = `${left}px`;
     dom.tooltip.style.top = `${top}px`;
   }
@@ -1604,6 +1787,13 @@
     dom.inpMaxPrice.value = "";
     dom.inpMinReviews.value = "";
     dom.chkUsableOnly.checked = false;
+    dom.inpMinPrice.classList.remove("invalid");
+    dom.inpMaxPrice.classList.remove("invalid");
+    dom.inpMinReviews.classList.remove("invalid");
+    if (dom.filterError) {
+      dom.filterError.hidden = true;
+      dom.filterError.textContent = "";
+    }
 
     const dIdxOf = (n) => state.districts.indexOf(n);
     const cIdxOf = (n) => state.categories.indexOf(n);
@@ -1620,8 +1810,12 @@
       state.showLandmarks = true;
       dom.chkLandmarks.checked = true;
     } else if (name === "japanese_gubei") {
-      if (dIdxOf("闵行区") >= 0) state.selectedDistricts.add(dIdxOf("闵行区"));
       if (dIdxOf("长宁区") >= 0) state.selectedDistricts.add(dIdxOf("长宁区"));
+      if (cIdxOf("本菜") >= 0) state.selectedCategories.add(cIdxOf("本菜"));
+      state.showLandmarks = true;
+      dom.chkLandmarks.checked = true;
+    } else if (name === "korean_hongquan") {
+      if (dIdxOf("闵行区") >= 0) state.selectedDistricts.add(dIdxOf("闵行区"));
       if (cIdxOf("料理") >= 0) state.selectedCategories.add(cIdxOf("料理"));
       state.showLandmarks = true;
       dom.chkLandmarks.checked = true;

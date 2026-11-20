@@ -2,7 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="上海市 78,018 条全量餐饮空间分布与 HBase 存储结构交互式可视化平台：支持多维筛选高亮、区位商实时计算、5 处地标圈验证与 15 位 RowKey / 11 个 Cell 拆解。" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d1526'/%3E%3Ccircle cx='16' cy='16' r='8' fill='%2322d3ee'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%230d1526'/%3E%3C/svg%3E" />
   <title>上海市餐饮空间分布与 HBase 存储可视化</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -18,17 +20,18 @@
         </div>
       </div>
 
-      <div class="presets" id="presets">
+      <div class="presets" id="presets" aria-label="快捷分析预设">
         <button class="preset-btn active" data-preset="all">🌐 全部 78,018 点</button>
-        <button class="preset-btn" data-preset="baoshan_seafood">🐟 宝山区 × 海鲜</button>
+        <button class="preset-btn" data-preset="baoshan_seafood">🐟 宝山 × 海鲜</button>
         <button class="preset-btn" data-preset="huangpu_western">🍷 原黄浦 × 西餐</button>
-        <button class="preset-btn" data-preset="japanese_gubei">🍣 闵行/长宁 × 料理</button>
+        <button class="preset-btn" data-preset="japanese_gubei">🍣 长宁 × 日本菜*(本菜)</button>
+        <button class="preset-btn" data-preset="korean_hongquan">🥘 闵行 × 韩国料理*(料理)</button>
         <button class="preset-btn" data-preset="luxury">💎 高档与奢华 (&gt;200元)</button>
       </div>
 
       <div class="top-actions">
         <span class="status-pill" id="hbase-status">数据加载中...</span>
-        <select id="basemap-select" class="select-sm" title="切换底图">
+        <select id="basemap-select" class="select-sm" title="切换底图" aria-label="切换底图">
           <option value="amap_dark">底图：高德暗夜</option>
           <option value="amap_light">底图：高德亮色</option>
           <option value="esri_street">底图：WGS84 街道</option>
@@ -36,8 +39,8 @@
           <option value="esri_sat">底图：高清卫星影像</option>
           <option value="offline">底图：纯离线极简</option>
         </select>
-        <button id="btn-fit-match" class="btn-sm" title="缩放到当前筛选结果">定位高亮区</button>
-        <button id="btn-reset-view" class="btn-sm">重置上海视野</button>
+        <button id="btn-fit-match" class="btn-sm" title="缩放到当前筛选结果">定位结果</button>
+        <button id="btn-reset-view" class="btn-sm">重置视野</button>
       </div>
     </header>
 
@@ -63,14 +66,14 @@
             <label><input type="checkbox" id="chk-autofit" checked /> 筛选后自动飞向目标区</label>
           </div>
           <div class="toggle-row">
-            <label><input type="checkbox" id="chk-landmarks" checked /> 显示 4 处地标与研究半径圈</label>
+            <label><input type="checkbox" id="chk-landmarks" checked /> 显示 5 处地标与研究半径圈</label>
           </div>
           <div class="toggle-row">
             <label><input type="checkbox" id="chk-labels" checked /> 显示行政区名称标注</label>
           </div>
           <div class="slider-row">
             <span>高亮点击半径</span>
-            <input type="range" id="rng-point-size" min="1.5" max="6" step="0.5" value="3.0" />
+            <input type="range" id="rng-point-size" min="1.5" max="6" step="0.5" value="3.0" aria-label="高亮点击半径" />
             <span id="val-point-size">3.0px</span>
           </div>
         </section>
@@ -83,7 +86,7 @@
               <button class="link-btn" id="btn-dist-clear">不限</button>
             </div>
           </div>
-          <p class="hint">点选可多选；含原始数据里的老卢湾、老闸北</p>
+          <p class="hint">点选可多选；保留原始数据的老卢湾/老闸北，其中奉贤(11)/金山(10)为原表低样本</p>
           <div class="chip-grid" id="district-list"></div>
         </section>
 
@@ -95,7 +98,8 @@
               <button class="link-btn" id="btn-cat-clear">不限</button>
             </div>
           </div>
-          <input type="text" id="cat-search" class="input-sm" placeholder="搜索菜系（如：海鲜、咖啡、西餐）..." />
+          <p class="hint">* 为据 2 字截断规律与空间/价位推断（如 本菜→日本菜、料理→韩国料理、浙菜→本帮江浙菜）；北菜/西菜/南菜/州菜保留原值</p>
+          <input type="text" id="cat-search" class="input-sm" placeholder="搜索菜系（如：海鲜、咖啡、日料、韩餐）..." aria-label="搜索菜系" />
           <div class="chip-grid cat-grid" id="category-list"></div>
         </section>
 
@@ -113,6 +117,7 @@
             <label>点评 ≥ <input type="number" id="inp-min-reviews" min="0" placeholder="0" /></label>
             <label class="inline-check"><input type="checkbox" id="chk-usable-only" /> 仅有效(is_usable=1)</label>
           </div>
+          <div class="filter-error" id="filter-error" role="alert" hidden></div>
         </section>
       </aside>
 
@@ -134,8 +139,8 @@
 
         <!-- 缩放控件 -->
         <div class="map-controls">
-          <button id="btn-zoom-in" title="放大">+</button>
-          <button id="btn-zoom-out" title="缩小">−</button>
+          <button id="btn-zoom-in" title="放大" aria-label="放大地图">+</button>
+          <button id="btn-zoom-out" title="缩小" aria-label="缩小地图">−</button>
         </div>
 
         <!-- 比例尺与坐标 -->
@@ -148,7 +153,10 @@
         <div class="map-legend" id="map-legend">
           <div class="legend-head">
             <span>菜系图例（点击单选/取消）</span>
-            <button class="link-btn" id="btn-legend-toggle">收起</button>
+            <div class="mini-actions">
+              <button class="link-btn" id="btn-legend-all">全部28类</button>
+              <button class="link-btn" id="btn-legend-toggle">收起</button>
+            </div>
           </div>
           <div class="legend-items" id="legend-items"></div>
         </div>
@@ -159,7 +167,10 @@
         <!-- 手机端点击点位浮条 -->
         <div class="mobile-pick-banner" id="mobile-pick-banner" hidden>
           <div class="mpb-info" id="mpb-info"></div>
-          <button class="btn-xs" id="btn-mpb-detail">看 Cell 拆解</button>
+          <div class="mpb-actions">
+            <button class="btn-xs" id="btn-mpb-detail">看 Cell 拆解</button>
+            <button class="btn-xs banner-close" id="btn-mpb-close" title="收起提示" aria-label="收起提示">×</button>
+          </div>
         </div>
 
         <!-- 加载遮罩 -->
@@ -212,9 +223,13 @@
         <section class="card hbase-card">
           <div class="card-head">
             <h2>HBase 存储结构检视</h2>
-            <button class="btn-xs" id="btn-live-get">HBase 实时 Get</button>
+            <div class="mini-actions">
+              <button class="btn-xs" id="btn-prev-record" title="上一条命中记录" aria-label="上一条命中记录">◀</button>
+              <button class="btn-xs" id="btn-next-record" title="下一条命中记录" aria-label="下一条命中记录">▶</button>
+              <button class="btn-xs" id="btn-live-get">HBase 实时 Get</button>
+            </div>
           </div>
-          <p class="hint">点击地图上任意餐厅点，实时拆解它的 RowKey 与 11 个 Cell</p>
+          <p class="hint">点击地图点位或使用 ◀/▶ 切换命中记录，拆解 RowKey 与 11 个 Cell（<code>info:category</code> 保留原始 2 字截断值）</p>
 
           <div id="inspector-empty" class="inspector-empty">尚未选中点位</div>
           <div id="inspector-body" hidden>
